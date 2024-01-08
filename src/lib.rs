@@ -1,3 +1,7 @@
+//! Adapted from https://github.com/messense/unidiff-rs
+//!
+//! --------------------------------------------------------------------
+//!
 //! Unified diff parsing/metadata extraction library for Rust
 //!
 //! # Examples
@@ -81,6 +85,25 @@ impl error::Error for Error {
 /// `unidiff::parse` result type
 pub type Result<T> = ::std::result::Result<T, Error>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LineType {
+    Added,
+    Removed,
+    Context,
+    Empty,
+}
+
+impl fmt::Display for LineType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            LineType::Added => write!(f, "+"),
+            LineType::Removed => write!(f, "-"),
+            LineType::Context => write!(f, " "),
+            LineType::Empty => write!(f, "\n"),
+        }
+    }
+}
+
 /// A diff line
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Line {
@@ -91,35 +114,35 @@ pub struct Line {
     /// Diff file line number
     pub diff_line_no: usize,
     /// Diff line type
-    pub line_type: String,
+    pub line_type: LineType,
     /// Diff line content value
     pub value: String,
 }
 
 impl Line {
-    pub fn new<T: Into<String>>(value: T, line_type: T) -> Line {
+    pub fn new<T: Into<String>>(value: T, line_type: LineType) -> Line {
         Line {
             source_line_no: Some(0usize),
             target_line_no: Some(0usize),
             diff_line_no: 0usize,
-            line_type: line_type.into(),
+            line_type,
             value: value.into(),
         }
     }
 
     /// Diff line type is added
     pub fn is_added(&self) -> bool {
-        LINE_TYPE_ADDED == &self.line_type
+        self.line_type == LineType::Added
     }
 
     /// Diff line type is removed
     pub fn is_removed(&self) -> bool {
-        LINE_TYPE_REMOVED == &self.line_type
+        self.line_type == LineType::Removed
     }
 
     /// Diff line type is context
     pub fn is_context(&self) -> bool {
-        LINE_TYPE_CONTEXT == &self.line_type
+        self.line_type == LineType::Context
     }
 }
 
@@ -149,8 +172,6 @@ pub struct Hunk {
     /// Section header
     pub section_header: String,
     lines: Vec<Line>,
-    source: Vec<String>,
-    target: Vec<String>,
 }
 
 impl Hunk {
@@ -164,14 +185,12 @@ impl Hunk {
         Hunk {
             added: 0usize,
             removed: 0usize,
-            source_start: source_start,
-            source_length: source_length,
-            target_start: target_start,
-            target_length: target_length,
+            source_start,
+            source_length,
+            target_start,
+            target_length,
             section_header: section_header.into(),
             lines: vec![],
-            source: vec![],
-            target: vec![],
         }
     }
 
@@ -183,11 +202,6 @@ impl Hunk {
     /// Count of lines removed
     pub fn removed(&self) -> usize {
         self.removed
-    }
-
-    /// Is this hunk valid
-    pub fn is_valid(&self) -> bool {
-        self.source.len() == self.source_length && self.target.len() == self.target_length
     }
 
     /// Lines from source file
@@ -212,17 +226,9 @@ impl Hunk {
     pub fn append(&mut self, line: Line) {
         if line.is_added() {
             self.added = self.added + 1;
-            self.target
-                .push(format!("{}{}", line.line_type, line.value));
         } else if line.is_removed() {
             self.removed = self.removed + 1;
-            self.source
-                .push(format!("{}{}", line.line_type, line.value));
         } else if line.is_context() {
-            self.source
-                .push(format!("{}{}", line.line_type, line.value));
-            self.target
-                .push(format!("{}{}", line.line_type, line.value));
         }
         self.lines.push(line);
     }
@@ -403,13 +409,11 @@ impl PatchedFile {
         let mut hunk = Hunk {
             added: 0usize,
             removed: 0usize,
-            source: vec![],
-            target: vec![],
             lines: vec![],
-            source_start: source_start,
-            source_length: source_length,
-            target_start: target_start,
-            target_length: target_length,
+            source_start,
+            source_length,
+            target_start,
+            target_length,
             section_header: section_header.to_owned(),
         };
         let mut source_line_no = source_start;
@@ -418,28 +422,34 @@ impl PatchedFile {
         let expected_target_end = target_start + target_length;
         for &(diff_line_no, line) in diff {
             if let Some(valid_line) = RE_HUNK_BODY_LINE.captures(line) {
-                let mut line_type = valid_line.name("line_type").unwrap().as_str();
-                if line_type == LINE_TYPE_EMPTY || line_type == "" {
-                    line_type = LINE_TYPE_CONTEXT;
-                }
+                let line_type_str = valid_line.name("line_type").unwrap().as_str();
+                let line_type = match line_type_str {
+                    LINE_TYPE_ADDED => LineType::Added,
+                    LINE_TYPE_REMOVED => LineType::Removed,
+                    LINE_TYPE_CONTEXT => LineType::Context,
+                    LINE_TYPE_EMPTY => LineType::Context,
+                    "" => LineType::Context,
+                    _ if line.ends_with("\\ No newline at end of file") => LineType::Empty,
+                    _ => return Err(Error::ExpectLine(line.to_owned())),
+                };
                 let value = valid_line.name("value").unwrap().as_str();
                 let mut original_line = Line {
                     source_line_no: None,
                     target_line_no: None,
                     diff_line_no: diff_line_no + 1,
-                    line_type: line_type.to_owned(),
+                    line_type: line_type.clone(),
                     value: value.to_owned(),
                 };
                 match line_type {
-                    LINE_TYPE_ADDED => {
+                    LineType::Added => {
                         original_line.target_line_no = Some(target_line_no);
                         target_line_no = target_line_no + 1;
                     }
-                    LINE_TYPE_REMOVED => {
+                    LineType::Removed => {
                         original_line.source_line_no = Some(source_line_no);
                         source_line_no = source_line_no + 1;
                     }
-                    LINE_TYPE_CONTEXT => {
+                    LineType::Context => {
                         original_line.target_line_no = Some(target_line_no);
                         target_line_no = target_line_no + 1;
                         original_line.source_line_no = Some(source_line_no);
